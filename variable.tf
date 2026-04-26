@@ -1,9 +1,9 @@
 variable "aws_region" {
-  default = "ap-southeast-1"
+  default = "eu-north-1"
 }
 
 variable "aws_profile" {
-  default = "my-aws-profile"
+  default = "abir"
 }
 
 variable "vpc_cidr" {

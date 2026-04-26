@@ -19,15 +19,17 @@ terraform {
   }
 }
 
+# ---------------------------------
+# AWS Provider
+# ---------------------------------
 provider "aws" {
   region  = var.aws_region
   profile = var.aws_profile
 }
 
-# ----------------
-# SSH Key
-# ----------------
-
+# ---------------------------------
+# SSH Key Generation
+# ---------------------------------
 resource "tls_private_key" "ssh_key" {
   algorithm = "RSA"
   rsa_bits  = 4096
@@ -40,14 +42,13 @@ resource "local_file" "private_key" {
 }
 
 resource "aws_key_pair" "generated_key" {
-  key_name   = "generated-assignment-key"
+  key_name   = "assignment-generated-key"
   public_key = tls_private_key.ssh_key.public_key_openssh
 }
 
-# ----------------
+# ---------------------------------
 # VPC
-# ----------------
-
+# ---------------------------------
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
@@ -58,6 +59,9 @@ resource "aws_vpc" "main" {
   }
 }
 
+# ---------------------------------
+# Internet Gateway
+# ---------------------------------
 resource "aws_internet_gateway" "igw" {
   vpc_id = aws_vpc.main.id
 
@@ -66,14 +70,12 @@ resource "aws_internet_gateway" "igw" {
   }
 }
 
-# ----------------
-# Subnets
-# ----------------
-
+# ---------------------------------
+# Public Subnet
+# ---------------------------------
 resource "aws_subnet" "public_subnet" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.public_subnet_cidr
-  availability_zone       = "${var.aws_region}a"
   map_public_ip_on_launch = true
 
   tags = {
@@ -81,10 +83,12 @@ resource "aws_subnet" "public_subnet" {
   }
 }
 
+# ---------------------------------
+# Private Subnet
+# ---------------------------------
 resource "aws_subnet" "private_subnet" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.private_subnet_cidr
-  availability_zone       = "${var.aws_region}b"
   map_public_ip_on_launch = false
 
   tags = {
@@ -92,16 +96,19 @@ resource "aws_subnet" "private_subnet" {
   }
 }
 
-# ----------------
-# Route Tables
-# ----------------
-
+# ---------------------------------
+# Public Route Table
+# ---------------------------------
 resource "aws_route_table" "public_rt" {
   vpc_id = aws_vpc.main.id
 
   route {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.igw.id
+  }
+
+  tags = {
+    Name = "public-route-table"
   }
 }
 
@@ -110,8 +117,16 @@ resource "aws_route_table_association" "public_assoc" {
   route_table_id = aws_route_table.public_rt.id
 }
 
+# ---------------------------------
+# Private Route Table
+# No Internet Access
+# ---------------------------------
 resource "aws_route_table" "private_rt" {
   vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "private-route-table"
+  }
 }
 
 resource "aws_route_table_association" "private_assoc" {
@@ -119,15 +134,17 @@ resource "aws_route_table_association" "private_assoc" {
   route_table_id = aws_route_table.private_rt.id
 }
 
-# ----------------
-# Security Groups
-# ----------------
-
+# ---------------------------------
+# Public Security Group
+# SSH + HTTP Allowed
+# ---------------------------------
 resource "aws_security_group" "public_sg" {
-  name   = "public-sg"
-  vpc_id = aws_vpc.main.id
+  name        = "public-security-group"
+  description = "Allow SSH and HTTP"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
+    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -135,6 +152,7 @@ resource "aws_security_group" "public_sg" {
   }
 
   ingress {
+    description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
@@ -147,13 +165,23 @@ resource "aws_security_group" "public_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = {
+    Name = "public-sg"
+  }
 }
 
+# ---------------------------------
+# Private Security Group
+# SSH only from Public SG
+# ---------------------------------
 resource "aws_security_group" "private_sg" {
-  name   = "private-sg"
-  vpc_id = aws_vpc.main.id
+  name        = "private-security-group"
+  description = "Allow SSH only from public security group"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
+    description     = "SSH from Bastion/Public"
     from_port       = 22
     to_port         = 22
     protocol        = "tcp"
@@ -166,29 +194,36 @@ resource "aws_security_group" "private_sg" {
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-}
 
-# ----------------
-# AMI
-# ----------------
-
-data "aws_ami" "amazon_linux" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  tags = {
+    Name = "private-sg"
   }
 }
 
-# ----------------
-# EC2 Instances
-# ----------------
+# ---------------------------------
+# Latest Ubuntu Linux AMI
+# ---------------------------------
+data "aws_ami" "ubuntu_linux" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
 
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+# ---------------------------------
+# Public EC2 Instance
+# ---------------------------------
 resource "aws_instance" "public_ec2" {
-  ami                         = data.aws_ami.amazon_linux.id
-  instance_type               = "t2.micro"
+  ami                         = data.aws_ami.ubuntu_linux.id
+  instance_type               = "t3.micro"
   subnet_id                   = aws_subnet.public_subnet.id
   vpc_security_group_ids      = [aws_security_group.public_sg.id]
   associate_public_ip_address = true
@@ -199,9 +234,12 @@ resource "aws_instance" "public_ec2" {
   }
 }
 
+# ---------------------------------
+# Bastion Host
+# ---------------------------------
 resource "aws_instance" "bastion_host" {
-  ami                         = data.aws_ami.amazon_linux.id
-  instance_type               = "t2.micro"
+  ami                         = data.aws_ami.ubuntu_linux.id
+  instance_type               = "t3.micro"
   subnet_id                   = aws_subnet.public_subnet.id
   vpc_security_group_ids      = [aws_security_group.public_sg.id]
   associate_public_ip_address = true
@@ -212,9 +250,12 @@ resource "aws_instance" "bastion_host" {
   }
 }
 
+# ---------------------------------
+# Private EC2 Instance
+# ---------------------------------
 resource "aws_instance" "private_ec2" {
-  ami                         = data.aws_ami.amazon_linux.id
-  instance_type               = "t2.micro"
+  ami                         = data.aws_ami.ubuntu_linux.id
+  instance_type               = "t3.micro"
   subnet_id                   = aws_subnet.private_subnet.id
   vpc_security_group_ids      = [aws_security_group.private_sg.id]
   associate_public_ip_address = false
@@ -224,3 +265,4 @@ resource "aws_instance" "private_ec2" {
     Name = "private-ec2"
   }
 }
+
